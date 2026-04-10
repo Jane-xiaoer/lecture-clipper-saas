@@ -39,35 +39,13 @@
     <!-- SRT（可选） -->
     <div>
       <label class="text-sm text-gray-600 mb-1 block">
-        字幕文件 (.srt)
-        <span class="text-gray-400 font-normal">— 可选，没有会自动转写</span>
+        已有字幕文件
+        <span class="text-gray-400 font-normal">— 可选，没有会自动生成</span>
       </label>
       <div class="upload-zone rounded-lg p-3 text-center cursor-pointer" onclick="document.getElementById('input-srt').click()">
-        <div id="srt-label" class="text-sm text-gray-400">点击选择字幕（可留空）</div>
+        <div id="srt-label" class="text-sm text-gray-400">点击上传字幕文件（可留空，留空则自动转写）</div>
         <input id="input-srt" type="file" accept=".srt" class="hidden" onchange="labelFile('srt', this)">
       </div>
-    </div>
-
-    <!-- 转写配置（没有 SRT 时显示） -->
-    <div id="whisper-section" class="border border-dashed border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
-      <p class="text-xs text-gray-500 font-medium">自动转写配置（有 SRT 时忽略）</p>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="text-sm text-gray-600 mb-1 block">转写服务</label>
-          <select id="input-whisper" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none bg-white">
-            <option value="auto">自动选择</option>
-            <option value="groq">Groq（免费推荐）</option>
-            <option value="openai">OpenAI Whisper</option>
-            <option value="local">本地（无需 Key）</option>
-          </select>
-        </div>
-        <div>
-          <label class="text-sm text-gray-600 mb-1 block">转写 Key <span class="text-gray-400">(Groq/OpenAI)</span></label>
-          <input id="input-whisper-key" type="password" placeholder="留空则复用下方 Key"
-            class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none">
-        </div>
-      </div>
-      <p class="text-xs text-gray-400">Groq 免费申请：<a href="https://console.groq.com" target="_blank" class="underline">console.groq.com</a></p>
     </div>
 
     <!-- LLM API 配置 -->
@@ -111,12 +89,18 @@
   <!-- Step 3: 话题确认 -->
   <div id="panel-review" class="hidden bg-white rounded-xl border p-6 space-y-4">
     <h2 class="font-semibold text-gray-800">确认话题分组</h2>
-    <p class="text-sm text-gray-500">AI 识别了以下话题，可以删除或调整顺序，确认后开始切片。</p>
+    <p class="text-sm text-gray-500">AI 识别了以下话题段落，确认无误后开始切片。如果分组不准确，可以重新分析。</p>
     <div id="topics-list" class="space-y-2"></div>
-    <button onclick="confirmTopics()"
-      class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
-      确认，开始切片
-    </button>
+    <div class="flex gap-3 pt-1">
+      <button onclick="retagTopics()"
+        class="flex-1 border border-gray-300 hover:border-gray-400 text-gray-600 font-medium py-2.5 rounded-lg text-sm transition-colors">
+        分组不准，重新分析
+      </button>
+      <button onclick="confirmTopics()"
+        class="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
+        确认，开始切片
+      </button>
+    </div>
   </div>
 
   <!-- Step 4: 完成下载 -->
@@ -166,9 +150,6 @@ async function submitJob() {
   const srt            = document.getElementById('input-srt').files[0];
   const apiKey         = document.getElementById('input-apikey').value.trim();
   const provider       = document.getElementById('input-provider').value;
-  const whisperProv    = document.getElementById('input-whisper').value;
-  const whisperKey     = document.getElementById('input-whisper-key').value.trim();
-
   if (!video || !apiKey) {
     alert('请上传视频并填写 API Key');
     return;
@@ -179,8 +160,6 @@ async function submitJob() {
   if (srt) fd.append('srt', srt);
   fd.append('api_key', apiKey);
   fd.append('provider', provider);
-  fd.append('whisper_provider', whisperProv);
-  fd.append('whisper_key', whisperKey);
 
   show('progress');
   setProgress(5, '上传中...');
@@ -242,21 +221,31 @@ function renderTopics(topics) {
   const list = document.getElementById('topics-list');
   list.innerHTML = '';
   topics.forEach((t, i) => {
-    const dur = ''; // 可加时长
     const el = document.createElement('div');
-    el.className = 'flex items-center gap-2 p-3 border rounded-lg group';
+    el.className = 'p-3 border rounded-lg space-y-1';
     el.innerHTML = `
-      <span class="w-6 h-6 bg-indigo-100 text-indigo-600 rounded text-xs flex items-center justify-center font-medium">${i+1}</span>
-      <span class="flex-1 text-sm text-gray-700">${t.name}</span>
-      <button onclick="removeTopic(${i})" class="text-gray-300 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition">✕</button>
+      <div class="flex items-center gap-2">
+        <span class="w-6 h-6 bg-indigo-100 text-indigo-600 rounded text-xs flex items-center justify-center font-medium flex-shrink-0">${i+1}</span>
+        <span class="font-medium text-sm text-gray-800">${t.name}</span>
+        ${t.duration_min ? `<span class="ml-auto text-xs text-gray-400">${t.duration_min} 分钟</span>` : ''}
+      </div>
+      ${t.time_desc ? `<div class="text-xs text-indigo-500 pl-8">${t.time_desc}</div>` : ''}
+      ${t.preview   ? `<div class="text-xs text-gray-400 pl-8 truncate">${t.preview}…</div>` : ''}
     `;
     list.appendChild(el);
   });
 }
 
-function removeTopic(i) {
-  currentTopics.splice(i, 1);
-  renderTopics(currentTopics);
+async function retagTopics() {
+  try {
+    const res = await fetch(`${API}/api/retag/${currentJobId}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    show('progress');
+    setProgress(15, '重新分析话题中...');
+    startPolling();
+  } catch (e) {
+    showError(e.message);
+  }
 }
 
 async function confirmTopics() {
@@ -287,9 +276,9 @@ function resetAll() {
   document.getElementById('input-video').value = '';
   document.getElementById('input-srt').value = '';
   document.getElementById('input-apikey').value = '';
-  document.getElementById('input-whisper-key').value = '';
+
   document.getElementById('video-label').textContent = '点击选择视频';
-  document.getElementById('srt-label').textContent = '点击选择字幕（可留空）';
+  document.getElementById('srt-label').textContent = '点击上传字幕文件（可留空，留空则自动转写）';
   show('upload');
 }
 </script>

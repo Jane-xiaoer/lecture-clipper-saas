@@ -35,6 +35,62 @@ def write_status(job_id: str, status: str, progress: int, message: str, extra: d
     data = {"job_id": job_id, "status": status, "progress": progress, "message": message, **extra}
     (job_dir(job_id) / "status.json").write_text(json.dumps(data, ensure_ascii=False))
 
+# ── SRT 辅助 ─────────────────────────────────────────────────────
+
+def _parse_srt_times(srt_path) -> list:
+    """返回每行的 start/end 秒数列表，与 tagger 行号对齐"""
+    import re
+    content = Path(srt_path).read_text(encoding="utf-8")
+    entries = []
+    for block in re.split(r'\n\n+', content.strip()):
+        lines = block.strip().split('\n')
+        time_line = next((l for l in lines if '-->' in l), None)
+        if not time_line:
+            continue
+        s, e = time_line.split('-->')
+        def ts2sec(ts):
+            ts = ts.strip().replace(',', '.')
+            h, m, sec = ts.split(':')
+            return int(h)*3600 + int(m)*60 + float(sec)
+        text = ' '.join(l for l in lines if '-->' not in l and not l.strip().isdigit()).strip()
+        if text:
+            entries.append({"start": ts2sec(s), "end": ts2sec(e), "text": text})
+    return entries
+
+def _fmt_min(sec: float) -> str:
+    m = int(sec) // 60
+    s = int(sec) % 60
+    return f"{m}:{s:02d}"
+
+def _enrich_topics(topics: list, entries: list) -> list:
+    """给每个 topic 加上 time_desc（时间段文字）和 preview（首句预览）"""
+    n = len(entries)
+    result = []
+    for t in topics:
+        if t.get("id") == "skip":
+            continue
+        ranges = t.get("ranges", [])
+        total_sec = 0.0
+        time_parts = []
+        preview = ""
+        for r in ranges:
+            i0 = max(0, r[0])
+            i1 = min(n - 1, r[1])
+            if i0 >= n:
+                continue
+            seg_start = entries[i0]["start"]
+            seg_end   = entries[i1]["end"]
+            total_sec += seg_end - seg_start
+            time_parts.append(f"{_fmt_min(seg_start)}–{_fmt_min(seg_end)}")
+            if not preview:
+                preview = entries[i0]["text"][:40]
+        t_copy = dict(t)
+        t_copy["time_desc"] = "  |  ".join(time_parts) if time_parts else ""
+        t_copy["duration_min"] = round(total_sec / 60, 1)
+        t_copy["preview"] = preview
+        result.append(t_copy)
+    return result
+
 # ── 核心 Pipeline ─────────────────────────────────────────────────
 
 def run_pipeline(job_id: str, api_key: str, provider: str, model_hint: str,
@@ -90,11 +146,12 @@ def run_pipeline(job_id: str, api_key: str, provider: str, model_hint: str,
         if r.returncode != 0:
             raise RuntimeError(r.stderr[-500:])
 
-        # 读取标注结果
+        # 读取标注结果，enriched with time ranges
         result = json.loads((d / "metadata" / "tagger_result.json").read_text())
-        topics = [t for t in result["topics"] if t["id"] != "skip"]
+        entries = _parse_srt_times(d / "input.srt")
+        topics = _enrich_topics(result["topics"], entries)
 
-        write_status(job_id, "review", 35, f"标注完成，共 {len(topics)} 个话题，请确认后继续",
+        write_status(job_id, "review", 35, f"标注完成，共 {len(topics)} 个话题，请确认",
                      extra={"topics": topics})
     except Exception as e:
         write_status(job_id, "error", 0, str(e)[:300])
@@ -168,6 +225,11 @@ async def submit(
             shutil.copyfileobj(srt.file, f)
         has_srt = True
 
+    # 保存任务元数据（retag 时复用）
+    (d / "job_meta.json").write_text(json.dumps(
+        {"api_key": api_key, "provider": provider, "model": model}, ensure_ascii=False
+    ))
+
     # 若未提供 whisper_key，尝试复用 api_key（OpenAI 用户两个 key 相同）
     effective_whisper_key = whisper_key or (api_key if provider == "openai" else "")
 
@@ -202,6 +264,53 @@ async def confirm(job_id: str, background_tasks: BackgroundTasks, body: dict = {
     write_status(job_id, "cutting", 35, "用户已确认，开始切片...")
     background_tasks.add_task(run_cutting_and_postprocess, job_id)
     return {"ok": True}
+
+
+@app.post("/api/retag/{job_id}")
+async def retag(job_id: str, background_tasks: BackgroundTasks):
+    """用户觉得话题分组不准，重新跑 LLM 标注"""
+    s = read_status(job_id)
+    if s.get("status") not in ("review", "error"):
+        raise HTTPException(400, f"当前状态不可重新分析（{s.get('status')}）")
+
+    # 读取原始 api_key / provider（保存在 job 目录）
+    meta_file = job_dir(job_id) / "job_meta.json"
+    if not meta_file.exists():
+        raise HTTPException(400, "缺少任务元数据，无法重新分析")
+    meta = json.loads(meta_file.read_text())
+
+    write_status(job_id, "tagging", 15, "重新分析话题中，请稍候...")
+    background_tasks.add_task(
+        _run_tagging_only, job_id, meta["api_key"], meta["provider"], meta.get("model", "")
+    )
+    return {"ok": True}
+
+
+def _run_tagging_only(job_id: str, api_key: str, provider: str, model_hint: str):
+    """只重跑 Step 1 标注，SRT 已存在"""
+    import subprocess
+    d = job_dir(job_id)
+    env = os.environ.copy()
+    llm_key_map = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY",
+                   "anthropic": "ANTHROPIC_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+    env[llm_key_map.get(provider, "GEMINI_API_KEY")] = api_key
+    try:
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "step1_tagger.py"),
+             "--srt", str(d / "input.srt"),
+             "--out", str(d / "metadata"),
+             "--model", model_hint or ""],
+            capture_output=True, text=True, env=env, cwd=str(Path(__file__).parent)
+        )
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr[-500:])
+        result = json.loads((d / "metadata" / "tagger_result.json").read_text())
+        entries = _parse_srt_times(d / "input.srt")
+        topics = _enrich_topics(result["topics"], entries)
+        write_status(job_id, "review", 35, f"重新分析完成，共 {len(topics)} 个话题",
+                     extra={"topics": topics})
+    except Exception as e:
+        write_status(job_id, "error", 0, str(e)[:300])
 
 
 @app.get("/api/download/{job_id}")
