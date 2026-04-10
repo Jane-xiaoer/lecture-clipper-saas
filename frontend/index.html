@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>讲座切片工具</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+  .upload-zone { border: 2px dashed #d1d5db; transition: border-color .2s; }
+  .upload-zone:hover { border-color: #6366f1; }
+  .progress-bar { transition: width .5s ease; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+<!-- Header -->
+<header class="bg-white border-b px-6 py-4 flex items-center gap-3">
+  <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-sm font-bold">切</div>
+  <h1 class="text-lg font-semibold text-gray-900">讲座切片工具</h1>
+  <span class="text-xs text-gray-400 ml-auto">直播讲座 → 话题切片 + 字幕烧入</span>
+</header>
+
+<main class="max-w-2xl mx-auto px-4 py-10 space-y-6">
+
+  <!-- Step 1: 上传表单 -->
+  <div id="panel-upload" class="bg-white rounded-xl border p-6 space-y-5">
+    <h2 class="font-semibold text-gray-800">上传素材</h2>
+
+    <!-- 视频 -->
+    <div>
+      <label class="text-sm text-gray-600 mb-1 block">视频文件 (.mp4)</label>
+      <div class="upload-zone rounded-lg p-4 text-center cursor-pointer" onclick="document.getElementById('input-video').click()">
+        <div id="video-label" class="text-sm text-gray-400">点击选择视频</div>
+        <input id="input-video" type="file" accept=".mp4" class="hidden" onchange="labelFile('video', this)">
+      </div>
+    </div>
+
+    <!-- SRT（可选） -->
+    <div>
+      <label class="text-sm text-gray-600 mb-1 block">
+        字幕文件 (.srt)
+        <span class="text-gray-400 font-normal">— 可选，没有会自动转写</span>
+      </label>
+      <div class="upload-zone rounded-lg p-3 text-center cursor-pointer" onclick="document.getElementById('input-srt').click()">
+        <div id="srt-label" class="text-sm text-gray-400">点击选择字幕（可留空）</div>
+        <input id="input-srt" type="file" accept=".srt" class="hidden" onchange="labelFile('srt', this)">
+      </div>
+    </div>
+
+    <!-- 转写配置（没有 SRT 时显示） -->
+    <div id="whisper-section" class="border border-dashed border-gray-200 rounded-lg p-4 space-y-3 bg-gray-50">
+      <p class="text-xs text-gray-500 font-medium">自动转写配置（有 SRT 时忽略）</p>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-sm text-gray-600 mb-1 block">转写服务</label>
+          <select id="input-whisper" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none bg-white">
+            <option value="auto">自动选择</option>
+            <option value="groq">Groq（免费推荐）</option>
+            <option value="openai">OpenAI Whisper</option>
+            <option value="local">本地（无需 Key）</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-sm text-gray-600 mb-1 block">转写 Key <span class="text-gray-400">(Groq/OpenAI)</span></label>
+          <input id="input-whisper-key" type="password" placeholder="留空则复用下方 Key"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none">
+        </div>
+      </div>
+      <p class="text-xs text-gray-400">Groq 免费申请：<a href="https://console.groq.com" target="_blank" class="underline">console.groq.com</a></p>
+    </div>
+
+    <!-- LLM API 配置 -->
+    <div class="grid grid-cols-2 gap-3">
+      <div>
+        <label class="text-sm text-gray-600 mb-1 block">话题分析（LLM）</label>
+        <select id="input-provider" class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none">
+          <option value="gemini">Gemini（推荐）</option>
+          <option value="openai">OpenAI / GPT</option>
+          <option value="anthropic">Anthropic / Claude</option>
+          <option value="openrouter">OpenRouter</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-sm text-gray-600 mb-1 block">LLM API Key</label>
+        <input id="input-apikey" type="password" placeholder="粘贴你的 API Key"
+          class="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-400 outline-none">
+      </div>
+    </div>
+
+    <p class="text-xs text-gray-400">API Key 仅用于本次请求，不会存储。</p>
+
+    <button onclick="submitJob()"
+      class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
+      开始分析
+    </button>
+  </div>
+
+  <!-- Step 2: 进度 -->
+  <div id="panel-progress" class="hidden bg-white rounded-xl border p-6 space-y-4">
+    <div class="flex items-center justify-between">
+      <h2 class="font-semibold text-gray-800">处理进度</h2>
+      <span id="job-id-display" class="text-xs text-gray-400 font-mono"></span>
+    </div>
+    <div class="bg-gray-100 rounded-full h-2">
+      <div id="progress-bar" class="progress-bar bg-indigo-500 h-2 rounded-full" style="width:0%"></div>
+    </div>
+    <p id="progress-msg" class="text-sm text-gray-600"></p>
+  </div>
+
+  <!-- Step 3: 话题确认 -->
+  <div id="panel-review" class="hidden bg-white rounded-xl border p-6 space-y-4">
+    <h2 class="font-semibold text-gray-800">确认话题分组</h2>
+    <p class="text-sm text-gray-500">AI 识别了以下话题，可以删除或调整顺序，确认后开始切片。</p>
+    <div id="topics-list" class="space-y-2"></div>
+    <button onclick="confirmTopics()"
+      class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
+      确认，开始切片
+    </button>
+  </div>
+
+  <!-- Step 4: 完成下载 -->
+  <div id="panel-done" class="hidden bg-white rounded-xl border p-6 text-center space-y-4">
+    <div class="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto text-2xl">✓</div>
+    <h2 class="font-semibold text-gray-800">处理完成</h2>
+    <p id="done-msg" class="text-sm text-gray-500"></p>
+    <a id="download-btn" href="#"
+      class="inline-block bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-6 py-2.5 rounded-lg text-sm transition-colors">
+      下载全部切片（ZIP）
+    </a>
+    <div>
+      <button onclick="resetAll()" class="text-xs text-gray-400 hover:text-gray-600 underline">处理新视频</button>
+    </div>
+  </div>
+
+  <!-- 错误 -->
+  <div id="panel-error" class="hidden bg-red-50 border border-red-200 rounded-xl p-5">
+    <h2 class="font-semibold text-red-700 mb-1">出错了</h2>
+    <p id="error-msg" class="text-sm text-red-600"></p>
+    <button onclick="resetAll()" class="mt-3 text-xs text-red-500 hover:text-red-700 underline">重试</button>
+  </div>
+
+</main>
+
+<script>
+const API = window.location.origin;
+let currentJobId = null;
+let pollTimer = null;
+let currentTopics = [];
+
+function labelFile(type, input) {
+  const label = document.getElementById(type + '-label');
+  label.textContent = input.files[0]?.name || '点击选择';
+  label.classList.toggle('text-indigo-600', !!input.files[0]);
+  label.classList.toggle('text-gray-400', !input.files[0]);
+}
+
+function show(id) {
+  ['upload','progress','review','done','error'].forEach(p =>
+    document.getElementById('panel-' + p).classList.toggle('hidden', p !== id)
+  );
+}
+
+async function submitJob() {
+  const video          = document.getElementById('input-video').files[0];
+  const srt            = document.getElementById('input-srt').files[0];
+  const apiKey         = document.getElementById('input-apikey').value.trim();
+  const provider       = document.getElementById('input-provider').value;
+  const whisperProv    = document.getElementById('input-whisper').value;
+  const whisperKey     = document.getElementById('input-whisper-key').value.trim();
+
+  if (!video || !apiKey) {
+    alert('请上传视频并填写 API Key');
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('video', video);
+  if (srt) fd.append('srt', srt);
+  fd.append('api_key', apiKey);
+  fd.append('provider', provider);
+  fd.append('whisper_provider', whisperProv);
+  fd.append('whisper_key', whisperKey);
+
+  show('progress');
+  setProgress(5, '上传中...');
+
+  try {
+    const res = await fetch(`${API}/api/submit`, { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const { job_id } = await res.json();
+    currentJobId = job_id;
+    document.getElementById('job-id-display').textContent = `#${job_id}`;
+    startPolling();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function setProgress(pct, msg) {
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('progress-msg').textContent = msg;
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(pollStatus, 3000);
+  pollStatus();
+}
+
+async function pollStatus() {
+  if (!currentJobId) return;
+  try {
+    const res = await fetch(`${API}/api/status/${currentJobId}`);
+    const data = await res.json();
+
+    setProgress(data.progress || 0, data.message || '');
+
+    if (data.status === 'transcribing' || data.status === 'tagging' ||
+        data.status === 'cutting' || data.status === 'postprocessing' || data.status === 'queued') {
+      show('progress');
+    } else if (data.status === 'review') {
+      clearInterval(pollTimer);
+      currentTopics = data.topics || [];
+      renderTopics(currentTopics);
+      show('review');
+    } else if (data.status === 'done') {
+      clearInterval(pollTimer);
+      document.getElementById('done-msg').textContent = data.message;
+      document.getElementById('download-btn').href = `${API}/api/download/${currentJobId}`;
+      show('done');
+    } else if (data.status === 'error') {
+      clearInterval(pollTimer);
+      showError(data.message);
+    }
+  } catch (e) {
+    console.error('轮询失败:', e);
+  }
+}
+
+function renderTopics(topics) {
+  const list = document.getElementById('topics-list');
+  list.innerHTML = '';
+  topics.forEach((t, i) => {
+    const dur = ''; // 可加时长
+    const el = document.createElement('div');
+    el.className = 'flex items-center gap-2 p-3 border rounded-lg group';
+    el.innerHTML = `
+      <span class="w-6 h-6 bg-indigo-100 text-indigo-600 rounded text-xs flex items-center justify-center font-medium">${i+1}</span>
+      <span class="flex-1 text-sm text-gray-700">${t.name}</span>
+      <button onclick="removeTopic(${i})" class="text-gray-300 hover:text-red-400 text-xs opacity-0 group-hover:opacity-100 transition">✕</button>
+    `;
+    list.appendChild(el);
+  });
+}
+
+function removeTopic(i) {
+  currentTopics.splice(i, 1);
+  renderTopics(currentTopics);
+}
+
+async function confirmTopics() {
+  try {
+    const res = await fetch(`${API}/api/confirm/${currentJobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topics: currentTopics })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    show('progress');
+    setProgress(35, '开始切片...');
+    startPolling();
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function showError(msg) {
+  document.getElementById('error-msg').textContent = msg;
+  show('error');
+}
+
+function resetAll() {
+  if (pollTimer) clearInterval(pollTimer);
+  currentJobId = null;
+  currentTopics = [];
+  document.getElementById('input-video').value = '';
+  document.getElementById('input-srt').value = '';
+  document.getElementById('input-apikey').value = '';
+  document.getElementById('input-whisper-key').value = '';
+  document.getElementById('video-label').textContent = '点击选择视频';
+  document.getElementById('srt-label').textContent = '点击选择字幕（可留空）';
+  show('upload');
+}
+</script>
+</body>
+</html>
